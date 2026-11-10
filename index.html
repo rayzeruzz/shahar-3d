@@ -66,6 +66,13 @@
       <button class="qbtn" data-q="high">High</button>
     </div>
     <div id="qinfo">Qurilma aniqlanmoqda…</div>
+    <h3>Vaqt</h3>
+    <div class="qrow">
+      <button class="qbtn" data-t="day">Kun</button>
+      <button class="qbtn" data-t="night">Tun</button>
+      <button class="qbtn" data-t="auto">Avto</button>
+    </div>
+    <div id="tinfo">Hozir: kun · 10:30</div>
   </div>
   <div id="bottom">
     <div id="modes">
@@ -162,7 +169,9 @@ function applyQuality(q, save) {
 /* ------------------------------------------------------------- batches --- */
 const matSolid = new THREE.MeshLambertMaterial({ color: 0xffffff });
 const matGlass = new THREE.MeshLambertMaterial({ color: 0x2b3f52, emissive: 0xffcf8a, emissiveIntensity: 0.03 });
+const matGlassLit = new THREE.MeshLambertMaterial({ color: 0x2b3f52, emissive: 0xffc879, emissiveIntensity: 0.03 });
 const matWater = new THREE.MeshLambertMaterial({ color: 0x3f7fbd, transparent: true, opacity: 0.85 });
+const LAMP_HEADS = [];
 
 class Batch {
   constructor(geo, mat, baseRot) {
@@ -461,6 +470,142 @@ function lamp(x, z, ry) {
   B.cyl.add(x, 5.2, z, 0.5, 0.22, 0.5, 0x3e4246);
   const [hx, hz] = local(x, z, ry || 0, 0, 0.9);
   B.sph.add(hx, 5.25, hz, 0.72, 0.5, 0.72, 0xfff2c8);
+  LAMP_HEADS.push([hx, hz]);
+}
+
+/* ----------------------------------------------------------- day / night -- */
+let dayT = 10.5, dayAuto = true, nightF = 0, lastMin = -1;
+const DAY_SKY = new THREE.Color(0x9ec7e8), NIGHT_SKY = new THREE.Color(0x070d1c);
+const DAY_FOG = new THREE.Color(0xa8cbe6), NIGHT_FOG = new THREE.Color(0x0b1426);
+const DAY_HEMI = new THREE.Color(0xd7ecff), NIGHT_HEMI = new THREE.Color(0x22304a);
+const DAY_GND = new THREE.Color(0x4e5f3c), NIGHT_GND = new THREE.Color(0x0c1420);
+const SUN_HI = new THREE.Color(0xfff4e0), SUN_LO = new THREE.Color(0xff9550);
+const MOON_COL = new THREE.Color(0x9fb6e8);
+const _dn = new THREE.Color();
+let bulbMesh = null, poolMesh = null, starPts = null, fcLightMesh = null;
+let bulbMat = null, poolMat = null, starMat = null;
+
+// windows are split in two batches: a share stays dark, the rest glow at night
+function buildWindows() {
+  const lit = [], dark = [];
+  const mats = B.win.mats, cols = B.win.cols;
+  for (let i = 0; i < mats.length; i++) (rnd() < 0.58 ? lit : dark).push(i);
+  const mk = (idx, mat) => {
+    if (!idx.length) return;
+    const m = new THREE.InstancedMesh(B.win.geo, mat, idx.length);
+    const c = new THREE.Color();
+    for (let k = 0; k < idx.length; k++) {
+      m.setMatrixAt(k, mats[idx[k]]);
+      c.setHex(cols[idx[k]]);
+      m.setColorAt(k, c);
+    }
+    m.instanceMatrix.needsUpdate = true;
+    if (m.instanceColor) m.instanceColor.needsUpdate = true;
+    m.castShadow = false; m.receiveShadow = true; m.frustumCulled = false;
+    scene.add(m);
+  };
+  mk(lit, matGlassLit);
+  mk(dark, matGlass);
+}
+
+function buildNightLights() {
+  const n = LAMP_HEADS.length;
+  const bulbGeo = new THREE.SphereGeometry(0.5, 6, 4);
+  bulbMat = new THREE.MeshBasicMaterial({ color: 0xfff2bf });
+  bulbMesh = new THREE.InstancedMesh(bulbGeo, bulbMat, n);
+  const poolGeo = new THREE.CircleGeometry(1, 16).rotateX(-Math.PI / 2);
+  poolMat = new THREE.MeshBasicMaterial({ color: 0xffcf8c, transparent: true, opacity: 0,
+    depthWrite: false, blending: THREE.AdditiveBlending, fog: false });
+  poolMesh = new THREE.InstancedMesh(poolGeo, poolMat, n);
+  const d = new THREE.Object3D();
+  for (let i = 0; i < n; i++) {
+    const [x, z] = LAMP_HEADS[i];
+    d.position.set(x, 5.25, z); d.rotation.set(0, 0, 0); d.scale.set(1.3, 1.05, 1.3);
+    d.updateMatrix(); bulbMesh.setMatrixAt(i, d.matrix);
+    const r = 6.2 + (i % 5) * 0.55;
+    d.position.set(x, 0.1, z); d.scale.set(r, 1, r);
+    d.updateMatrix(); poolMesh.setMatrixAt(i, d.matrix);
+  }
+  for (const m of [bulbMesh, poolMesh]) {
+    m.instanceMatrix.needsUpdate = true; m.frustumCulled = false;
+    m.castShadow = false; m.receiveShadow = false; m.visible = false;
+    scene.add(m);
+  }
+
+  // star field
+  const sp = new Float32Array(900 * 3);
+  for (let i = 0; i < 900; i++) {
+    const a = rnd() * Math.PI * 2, e = Math.acos(rnd() * 0.92), r = 1350;
+    sp[i * 3] = Math.cos(a) * Math.sin(e) * r;
+    sp[i * 3 + 1] = Math.cos(e) * r + 60;
+    sp[i * 3 + 2] = Math.sin(a) * Math.sin(e) * r;
+  }
+  const sg = new THREE.BufferGeometry();
+  sg.setAttribute('position', new THREE.BufferAttribute(sp, 3));
+  starMat = new THREE.PointsMaterial({ color: 0xdde6ff, size: 2.1, sizeAttenuation: false,
+    transparent: true, opacity: 0, depthWrite: false, fog: false });
+  starPts = new THREE.Points(sg, starMat);
+  starPts.frustumCulled = false;
+  scene.add(starPts);
+
+  // headlights and taillights of the refueling cars
+  fcLightMesh = new THREE.InstancedMesh(new THREE.BoxGeometry(1, 1, 1),
+    new THREE.MeshBasicMaterial({ color: 0xffffff, fog: false }), FUEL_MAX * 4);
+  const c = new THREE.Color();
+  for (let i = 0; i < FUEL_MAX; i++) {
+    for (let k = 0; k < 4; k++) {
+      c.setHex(k < 2 ? 0xfff4cf : 0xff3322);
+      fcLightMesh.setColorAt(i * 4 + k, c);
+    }
+  }
+  if (fcLightMesh.instanceColor) fcLightMesh.instanceColor.needsUpdate = true;
+  fcLightMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+  fcLightMesh.frustumCulled = false;
+  fcLightMesh.visible = false;
+  fcLightMesh.count = 0;
+  scene.add(fcLightMesh);
+}
+
+function syncTimeButtons() {
+  const active = dayAuto ? 'auto' : (dayT < 6 || dayT >= 19 ? 'night' : 'day');
+  document.querySelectorAll('.qbtn[data-t]').forEach(b => b.classList.toggle('on', b.dataset.t === active));
+}
+
+function updateDayNight(dt) {
+  if (dayAuto) dayT = (dayT + dt * 0.006) % 24;
+  const ang = ((dayT - 6) / 12) * Math.PI;
+  const el = Math.sin(ang);
+  const up = Math.max(0, el);
+  nightF = 1 - THREE.MathUtils.smoothstep(el, -0.14, 0.26);
+  const R = 560;
+  if (el >= 0) sun.position.set(Math.cos(ang) * R, Math.max(el * R, 30), 140 + Math.cos(ang) * 70);
+  else sun.position.set(-Math.cos(ang) * R, Math.max(-el * R, 70), 140 - Math.cos(ang) * 70);
+  sun.intensity = 0.26 + 1.55 * up;
+  sun.color.copy(el < 0 ? MOON_COL : _dn.copy(SUN_LO).lerp(SUN_HI, THREE.MathUtils.smoothstep(el, 0.02, 0.42)));
+  hemi.intensity = 0.24 + 0.9 * up;
+  hemi.color.copy(_dn.copy(NIGHT_HEMI).lerp(DAY_HEMI, 1 - nightF));
+  hemi.groundColor.copy(_dn.copy(NIGHT_GND).lerp(DAY_GND, 1 - nightF));
+  scene.background.copy(_dn.copy(NIGHT_SKY).lerp(DAY_SKY, 1 - nightF));
+  scene.fog.color.copy(_dn.copy(NIGHT_FOG).lerp(DAY_FOG, 1 - nightF));
+  scene.fog.far = QSET[quality].fogFar * (1 - 0.28 * nightF);
+  matGlassLit.emissiveIntensity = 0.03 + nightF * 1.25;
+  if (bulbMesh) {
+    const on = nightF > 0.02;
+    bulbMesh.visible = poolMesh.visible = on;
+    poolMat.opacity = nightF * 0.34;
+  }
+  if (starPts) { starPts.visible = nightF > 0.02; starMat.opacity = nightF * 0.9; }
+  if (fcLightMesh) fcLightMesh.visible = nightF > 0.18;
+  const mins = Math.floor(dayT * 60);
+  if (mins !== lastMin) {
+    lastMin = mins;
+    const el2 = document.getElementById('tinfo');
+    if (el2) {
+      const hh = String(Math.floor(mins / 60)).padStart(2, '0');
+      const mm = String(mins % 60).padStart(2, '0');
+      el2.textContent = 'Hozir: ' + (dayAuto ? 'avto' : (nightF > 0.5 ? 'tun' : 'kun')) + ' · ' + hh + ':' + mm;
+    }
+  }
 }
 
 /* ------------------------------------------------------------ buildings -- */
@@ -947,10 +1092,25 @@ function updateFuelCars(dt) {
       _fd.updateMatrix();
       fcWheelMesh.setMatrixAt(w++, _fd.matrix);
     }
+    if (fcLightMesh && fcLightMesh.count) {
+      const ca = Math.cos(c.ang), sa = Math.sin(c.ang);
+      let l = i * 4;
+      for (const sz of [1.92, -1.92]) for (const sx of [-0.58, 0.58]) {
+        _fd.position.set(c.x + ca * sx + sa * sz, 0.78, c.z - sa * sx + ca * sz);
+        _fd.rotation.set(0, c.ang, 0);
+        _fd.scale.set(0.34, 0.2, 0.12);
+        _fd.updateMatrix();
+        fcLightMesh.setMatrixAt(l++, _fd.matrix);
+      }
+    }
   }
   fcBodyMesh.instanceMatrix.needsUpdate = true;
   fcCabMesh.instanceMatrix.needsUpdate = true;
   fcWheelMesh.instanceMatrix.needsUpdate = true;
+  if (fcLightMesh) {
+    fcLightMesh.count = fuelCars.length * 4;
+    fcLightMesh.instanceMatrix.needsUpdate = true;
+  }
 }
 
 /* --------------------------------------------------------------- camera -- */
@@ -1004,8 +1164,21 @@ document.getElementById('setBtn').addEventListener('click', () => {
   document.getElementById('setBtn').classList.toggle('on', p.classList.contains('open'));
 });
 
-document.querySelectorAll('.qbtn').forEach(b => {
+document.querySelectorAll('.qbtn[data-q]').forEach(b => {
   b.addEventListener('click', () => applyQuality(b.dataset.q, true));
+});
+
+document.querySelectorAll('.qbtn[data-t]').forEach(b => {
+  b.addEventListener('click', () => {
+    const t = b.dataset.t;
+    if (t === 'day') { dayT = 10.5; dayAuto = false; }
+    else if (t === 'night') { dayT = 21.5; dayAuto = false; }
+    else dayAuto = true;
+    try { localStorage.setItem('shahar_t', t); } catch (e) {}
+    lastMin = -1;
+    updateDayNight(0);
+    syncTimeButtons();
+  });
 });
 
 document.querySelectorAll('.btn[data-mode]').forEach(b => {
@@ -1111,6 +1284,7 @@ function tick() {
   }
 
   applyCamera();
+  updateDayNight(dt);
   updatePeds(dt, clock.elapsedTime);
   updateFuelCars(dt);
   renderer.render(scene, camera);
@@ -1126,11 +1300,20 @@ function tick() {
 
 /* ----------------------------------------------------------------- init -- */
 buildCity();
-for (const key in B) B[key].build(key !== 'win');
+for (const key in B) if (key !== 'win') B[key].build(key !== 'win');
+buildWindows();
 buildPeds();
+buildNightLights();
 buildFuelCars();
 setMode('low');
 applyQuality(quality, false);
+try {
+  const savedT = localStorage.getItem('shahar_t');
+  if (savedT === 'night') { dayT = 21.5; dayAuto = false; }
+  else if (savedT === 'day') { dayT = 10.5; dayAuto = false; }
+} catch (e) {}
+updateDayNight(0);
+syncTimeButtons();
 
 addEventListener('resize', () => {
   camera.aspect = innerWidth / innerHeight;
