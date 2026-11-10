@@ -33,6 +33,17 @@
   .spinner{width:34px;height:34px;border:3px solid rgba(255,255,255,.16);border-top-color:#4f9dff;
     border-radius:50%;animation:spin 1s linear infinite}
   @keyframes spin{to{transform:rotate(360deg)}}
+  #panel{position:absolute;left:12px;right:12px;bottom:66px;max-width:340px;
+    background:rgba(9,17,28,.93);border:1px solid rgba(255,255,255,.16);border-radius:14px;
+    padding:12px 13px;pointer-events:auto;display:none;flex-direction:column;gap:10px;
+    backdrop-filter:blur(8px);box-shadow:0 12px 34px rgba(0,0,0,.45)}
+  #panel.open{display:flex}
+  #panel h3{margin:0;font-size:12.5px;color:#cfe0f0;font-weight:700;letter-spacing:.04em;text-transform:uppercase}
+  .qrow{display:flex;gap:8px}
+  .qbtn{flex:1;padding:9px 5px;border-radius:10px;border:1px solid rgba(255,255,255,.18);
+    background:rgba(255,255,255,.06);color:#dce9f6;font-size:12.5px;font-weight:600;cursor:pointer}
+  .qbtn.on{background:#2f7cf6;border-color:#5c9dff;color:#fff}
+  #qinfo{font-size:11.5px;color:rgba(255,255,255,.62);line-height:1.35}
   @media (max-width:640px){
     .btn{padding:9px 11px;font-size:12px}
     #hint{display:none}
@@ -45,13 +56,23 @@
 <div id="hud">
   <div id="top">
     <div class="chip"><b>Mahalla 3D</b> <span>· 75 uy · maktab, kasalxona, bog', masjid, bozor</span></div>
-    <div class="chip" id="stats"><span>FPS —</span></div>
+    <div class="chip" id="stats"><span>FPS —</span> · <span id="qtag">Medium</span></div>
+  </div>
+  <div id="panel">
+    <h3>Grafika sozlamalari</h3>
+    <div class="qrow">
+      <button class="qbtn" data-q="low">Low</button>
+      <button class="qbtn" data-q="medium">Medium</button>
+      <button class="qbtn" data-q="high">High</button>
+    </div>
+    <div id="qinfo">Qurilma aniqlanmoqda…</div>
   </div>
   <div id="bottom">
     <div id="modes">
       <button class="btn" data-mode="walk">Yurish</button>
       <button class="btn" data-mode="low">Past burchak</button>
       <button class="btn" data-mode="top">Tepa</button>
+      <button class="btn" id="setBtn">Sozlamalar</button>
     </div>
     <div id="hint">Sichqoncha — aylantirish · g'ildirak — zoom · WASD — yurish · 1 / 2 / 3 — ko'rinish</div>
   </div>
@@ -90,6 +111,54 @@ sc.left = -330; sc.right = 330; sc.top = 330; sc.bottom = -330; sc.near = 1; sc.
 scene.add(sun);
 scene.add(sun.target);
 
+/* ------------------------------------------------------------- quality --- */
+const QSET = {
+  low:    { pr: 1,   shadow: false, map: 512,  fogFar: 820,  far: 1600, peds: 70 },
+  medium: { pr: 1.5, shadow: true,  map: 1024, fogFar: 1050, far: 2200, peds: 120 },
+  high:   { pr: 2,   shadow: true,  map: 2048, fogFar: 1250, far: 3000, peds: 170 }
+};
+const QNAME = { low: 'Low', medium: 'Medium', high: 'High' };
+
+function detectQuality() {
+  const ua = navigator.userAgent || '';
+  const mobile = /Android|iPhone|iPad|iPod|Mobile|Tablet/i.test(ua);
+  const cores = navigator.hardwareConcurrency || 4;
+  const mem = navigator.deviceMemory || 4;
+  const small = Math.min(screen.width || 1920, screen.height || 1080) < 820;
+  if (mobile || small) return (cores >= 8 && mem >= 6) ? 'medium' : 'low';
+  if (cores >= 8 && mem >= 8) return 'high';
+  return 'medium';
+}
+
+let quality = 'medium';
+try { quality = localStorage.getItem('shahar_q') || detectQuality(); } catch (e) { quality = detectQuality(); }
+
+function applyQuality(q, save) {
+  if (!QSET[q]) q = 'medium';
+  quality = q;
+  if (save) { try { localStorage.setItem('shahar_q', q); } catch (e) {} }
+  const s = QSET[q];
+  renderer.setPixelRatio(Math.min(devicePixelRatio || 1, s.pr));
+  renderer.setSize(innerWidth, innerHeight);
+  if (sun.shadow.map) { sun.shadow.map.dispose(); sun.shadow.map = null; }
+  sun.shadow.mapSize.set(s.map, s.map);
+  sun.castShadow = s.shadow;
+  renderer.shadowMap.enabled = s.shadow;
+  scene.fog.far = s.fogFar;
+  camera.far = s.far;
+  camera.updateProjectionMatrix();
+  scene.traverse(o => { if (o.isMesh) o.castShadow = !!s.shadow && o.userData.wantShadow === true; });
+  setPedCount(s.peds);
+  const info = document.getElementById('qinfo');
+  if (info) info.textContent =
+    'Qurilma: ' + (navigator.hardwareConcurrency || '?') + ' yadro' +
+    (navigator.deviceMemory ? ' · ' + navigator.deviceMemory + ' GB RAM' : '') +
+    ' · hozir: ' + QNAME[q] + (s.shadow ? '' : ' · soyalar o‘chirilgan');
+  document.querySelectorAll('.qbtn').forEach(b => b.classList.toggle('on', b.dataset.q === q));
+  const tag = document.getElementById('qtag');
+  if (tag) tag.textContent = QNAME[q];
+}
+
 /* ------------------------------------------------------------- batches --- */
 const matSolid = new THREE.MeshLambertMaterial({ color: 0xffffff });
 const matGlass = new THREE.MeshLambertMaterial({ color: 0x2b3f52, emissive: 0xffcf8a, emissiveIntensity: 0.03 });
@@ -123,6 +192,7 @@ class Batch {
     mesh.instanceMatrix.needsUpdate = true;
     if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
     mesh.castShadow = castShadow;
+    mesh.userData.wantShadow = castShadow;
     mesh.receiveShadow = true;
     mesh.frustumCulled = false;
     scene.add(mesh);
@@ -633,8 +703,254 @@ function buildCity() {
     if (rnd() < 0.45) pine(x, z, rand(0.9, 1.5)); else tree(x, z, rand(0.9, 1.4));
   }
 
+  gasStation(-150, 250, -1);
+  gasStation(240, 250, -1);
+  gasStation(40, -250, -1);
+
   buildRoads();
   buildRailway();
+}
+
+/* ------------------------------------------------------------ gas station -- */
+function gasStation(cx, cz, dw) {
+  const lot = 34, dep = 26;
+  box(cx, 0.05, cz, lot, 0.1, dep, 0x45484d, 0);
+  // driveway joining the road
+  box(cx + dw * (lot / 2 + 15), 0.052, cz, 30, 0.11, 9, 0x45484d, 0);
+  // canopy
+  box(cx, 5.55, cz - 1, 24, 0.5, 15, 0xf2f0ea, 0);
+  box(cx, 5.92, cz - 1, 24.8, 0.38, 15.8, 0xd4463c, 0);
+  for (const dx of [-10.5, 10.5]) for (const dz of [-8, 6])
+    B.cyl.add(cx + dx, 2.75, cz - 1 + dz, 0.42, 5.6, 0.42, 0xd9d5cc, 0);
+  // pump islands
+  for (const dx of [-5.5, 5.5]) {
+    box(cx + dx, 0.22, cz, 1.5, 0.44, 7.6, 0xcfcabd, 0);
+    for (const dz of [-2.4, 2.4]) {
+      box(cx + dx, 1.18, cz + dz, 0.8, 1.9, 0.6, 0xd4463c, 0);
+      box(cx + dx + 0.48, 1.95, cz + dz, 0.16, 0.5, 0.22, 0x2a2a2a, 0);
+    }
+  }
+  // shop at the back
+  boxB(cx, cz + 11, 13, 7, 3.4, 0xece7db, 0);
+  box(cx, 3.55, cz + 11, 13.6, 0.3, 7.6, 0xd4463c, 0);
+  B.win.add(cx, 1.7, cz + 7.45, 10, 1.6, 1, 0x2b3f52, 0);
+  label("Do'kon", cx, 2.8, cz + 7.4, 0, 8, 1.4, '#8a2f28');
+  // price pylon by the entrance
+  B.cyl.add(cx + dw * 15, 3.2, cz - 9, 0.45, 6.4, 0.45, 0x8f8a80, 0);
+  label("YOQILG'I", cx + dw * 15, 6.9, cz - 9, 0, 8, 1.6, '#c23c33');
+  label('92 · 95 · GAZ', cx + dw * 15, 5.5, cz - 9, 0, 8, 1.4, '#1f4f7a');
+  for (let i = 0; i < 3; i++) car(cx + dw * (11 + i * 3), cz + 10.5, Math.PI / 2, pick(CAR), false);
+}
+
+/* ---------------------------------------------------------- pedestrians --- */
+const MAXPED = 170;
+const pedBodyMesh = new THREE.InstancedMesh(new THREE.BoxGeometry(1, 1, 1),
+  new THREE.MeshLambertMaterial({ color: 0xffffff }), MAXPED);
+const pedHeadMesh = new THREE.InstancedMesh(new THREE.SphereGeometry(1, 8, 6),
+  new THREE.MeshLambertMaterial({ color: 0xffffff }), MAXPED);
+pedBodyMesh.frustumCulled = false; pedHeadMesh.frustumCulled = false;
+pedBodyMesh.castShadow = true; pedHeadMesh.castShadow = true;
+pedBodyMesh.userData.wantShadow = true; pedHeadMesh.userData.wantShadow = true;
+pedBodyMesh.receiveShadow = true; pedHeadMesh.receiveShadow = true;
+pedBodyMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+pedHeadMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+scene.add(pedBodyMesh); scene.add(pedHeadMesh);
+
+const PED_LANES = [
+  { ax: 'x', c: -114.5, a: -200, b: 200, y: 0.12 },
+  { ax: 'x', c: 114.5, a: -200, b: 200, y: 0.12 },
+  { ax: 'z', c: -195.5, a: -112, b: 112, y: 0.12 },
+  { ax: 'z', c: 195.5, a: -112, b: 112, y: 0.12 },
+  { ax: 'z', c: -128, a: -112, b: 112, y: 0.06 },
+  { ax: 'z', c: -112, a: -112, b: 112, y: 0.06 },
+  { ax: 'z', c: -48, a: -112, b: 112, y: 0.06 },
+  { ax: 'z', c: -32, a: -112, b: 112, y: 0.06 },
+  { ax: 'z', c: 32, a: -112, b: 112, y: 0.06 },
+  { ax: 'z', c: 48, a: -112, b: 112, y: 0.06 },
+  { ax: 'z', c: 112, a: -112, b: 112, y: 0.06 },
+  { ax: 'z', c: 128, a: -112, b: 112, y: 0.06 },
+  { ax: 'x', c: -46, a: -190, b: 190, y: 0.06 },
+  { ax: 'x', c: -34, a: -190, b: 190, y: 0.06 },
+  { ax: 'x', c: 34, a: -190, b: 190, y: 0.06 },
+  { ax: 'x', c: 46, a: -190, b: 190, y: 0.06 }
+];
+const PED_CLOTHES = [0x2c3e50, 0x8e3b3b, 0x2f5f8a, 0x4a6b3a, 0x6b4a32, 0x9b6b3a,
+  0x3b3b46, 0xb04a5a, 0x30535f, 0x7a6a52, 0x455a6e, 0x8c6a3f, 0xc7bfae, 0x5d4b63];
+const PED_SKIN = [0xe6bd95, 0xd7a878, 0xc48f62, 0xa9714a, 0x8d5a3b, 0xf0cba6];
+const peds = [];
+let pedActive = 0;
+
+function buildPeds() {
+  for (const L of PED_LANES) {
+    for (let k = 0; k < 9; k++) {
+      peds.push({
+        ax: L.ax, c: L.c + (rnd() < 0.5 ? -0.8 : 0.8), y: L.y,
+        a: L.a, b: L.b, s: rand(L.a, L.b), dir: rnd() < 0.5 ? 1 : -1,
+        sp: rand(1.0, 1.85), scale: rand(0.92, 1.07), ph: rand(0, 6.28),
+        cc: pick(PED_CLOTHES), sk: pick(PED_SKIN)
+      });
+    }
+  }
+  const stay = [
+    [-201, -60], [201, 60], [-60, 120], [60, -120],
+    [-264, -2], [-262, 8], [262, 180], [270, 176],
+    [-40, 250], [-6, 152]
+  ];
+  for (const [x, z] of stay) {
+    for (let k = 0; k < 3; k++) {
+      peds.push({
+        ax: 'stand', x: x + rand(-2.4, 2.4), z: z + rand(-2.4, 2.4), y: 0.08,
+        ry0: rand(0, 6.28), sp: 0, scale: rand(0.9, 1.06), ph: rand(0, 6.28),
+        cc: pick(PED_CLOTHES), sk: pick(PED_SKIN)
+      });
+    }
+  }
+  const cb = new THREE.Color();
+  for (let i = 0; i < MAXPED; i++) {
+    if (i < peds.length) {
+      cb.setHex(peds[i].cc); pedBodyMesh.setColorAt(i, cb);
+      cb.setHex(peds[i].sk); pedHeadMesh.setColorAt(i, cb);
+    } else {
+      pedBodyMesh.setMatrixAt(i, new THREE.Matrix4().makeScale(0, 0, 0));
+      pedHeadMesh.setMatrixAt(i, new THREE.Matrix4().makeScale(0, 0, 0));
+    }
+  }
+  pedBodyMesh.instanceColor.needsUpdate = true;
+  pedHeadMesh.instanceColor.needsUpdate = true;
+  setPedCount(peds.length);
+  updatePeds(0, 0);
+}
+
+function setPedCount(n) {
+  pedActive = Math.min(MAXPED, Math.max(0, Math.min(n, peds.length)));
+  pedBodyMesh.count = pedActive;
+  pedHeadMesh.count = pedActive;
+}
+
+const _pd = new THREE.Object3D();
+function updatePeds(dt, t) {
+  for (let i = 0; i < pedActive; i++) {
+    const p = peds[i];
+    let x, z, ry;
+    if (p.ax === 'stand') {
+      x = p.x; z = p.z; ry = p.ry0 + Math.sin(t * 0.7 + p.ph) * 0.45;
+    } else {
+      if (p.sp > 0) {
+        p.s += p.dir * p.sp * dt;
+        if (p.s > p.b) { p.s = p.b; p.dir = -1; }
+        if (p.s < p.a) { p.s = p.a; p.dir = 1; }
+      }
+      if (p.ax === 'x') { x = p.s; z = p.c; ry = p.dir > 0 ? Math.PI / 2 : -Math.PI / 2; }
+      else { x = p.c; z = p.s; ry = p.dir > 0 ? 0 : Math.PI; }
+    }
+    const bob = p.sp > 0 ? Math.abs(Math.sin(t * 6 + p.ph)) * 0.05 : 0;
+    _pd.rotation.set(0, ry, 0);
+    _pd.position.set(x, p.y + 0.62 * p.scale + bob, z);
+    _pd.scale.set(0.44 * p.scale, 1.05 * p.scale, 0.3 * p.scale);
+    _pd.updateMatrix();
+    pedBodyMesh.setMatrixAt(i, _pd.matrix);
+    _pd.position.set(x, p.y + 1.36 * p.scale + bob, z);
+    _pd.scale.set(0.23 * p.scale, 0.25 * p.scale, 0.23 * p.scale);
+    _pd.updateMatrix();
+    pedHeadMesh.setMatrixAt(i, _pd.matrix);
+  }
+  if (!dt) { pedBodyMesh.instanceMatrix.needsUpdate = true; pedHeadMesh.instanceMatrix.needsUpdate = true; return; }
+  pedBodyMesh.instanceMatrix.needsUpdate = true;
+  pedHeadMesh.instanceMatrix.needsUpdate = true;
+}
+
+/* --------------------------------------------------------- refueling cars -- */
+const FUEL_MAX = 8;
+const fcBodyMesh = new THREE.InstancedMesh(new THREE.BoxGeometry(1, 1, 1),
+  new THREE.MeshLambertMaterial({ color: 0xffffff }), FUEL_MAX);
+const fcCabMesh = new THREE.InstancedMesh(new THREE.BoxGeometry(1, 1, 1),
+  new THREE.MeshLambertMaterial({ color: 0xffffff }), FUEL_MAX);
+const fcWheelMesh = new THREE.InstancedMesh(new THREE.CylinderGeometry(0.5, 0.5, 1, 10),
+  new THREE.MeshLambertMaterial({ color: 0x14161a }), FUEL_MAX * 4);
+for (const m of [fcBodyMesh, fcCabMesh, fcWheelMesh]) {
+  m.frustumCulled = false; m.castShadow = true; m.userData.wantShadow = true;
+  m.receiveShadow = true; m.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+  scene.add(m);
+}
+const fuelCars = [];
+
+function buildFuelCars() {
+  const stations = [[-150, 250, -1], [240, 250, -1], [40, -250, -1]];
+  const cb = new THREE.Color(), cc = new THREE.Color(0x2a3540);
+  let n = 0;
+  for (const [cx, cz, dw] of stations) {
+    const rail = [
+      { x: cx + dw * 120, z: cz - 6 }, { x: cx + dw * 42, z: cz - 6 },
+      { x: cx + dw * 24, z: cz - 6 }, { x: cx - 5.5, z: cz - 6 },
+      { x: cx - 5.5, z: cz - 2.4, w: 5 }, { x: cx - 5.5, z: cz + 5 },
+      { x: cx + dw * 24, z: cz + 5 }, { x: cx + dw * 120, z: cz + 5 }
+    ];
+    for (let k = 0; k < 2; k++) {
+      const path = rail.map(p => ({ ...p }));
+      if (k === 1) { // second car uses the far pump
+        path[3] = { x: cx + 5.5, z: cz - 6 };
+        path[4] = { x: cx + 5.5, z: cz - 2.4, w: 4.5 };
+        path[5] = { x: cx + 5.5, z: cz + 5 };
+      }
+      fuelCars.push({
+        path, i: 1, x: path[0].x, z: path[0].z,
+        ang: dw < 0 ? -Math.PI / 2 : Math.PI / 2, wait: rand(0, 9)
+      });
+      cb.setHex(pick(CAR));
+      fcBodyMesh.setColorAt(n, cb);
+      fcCabMesh.setColorAt(n, cc);
+      n++;
+    }
+  }
+  fcBodyMesh.instanceColor.needsUpdate = true;
+  fcCabMesh.instanceColor.needsUpdate = true;
+  fcBodyMesh.count = fcCabMesh.count = n;
+  fcWheelMesh.count = n * 4;
+  updateFuelCars(0);
+}
+
+const _fd = new THREE.Object3D();
+function updateFuelCars(dt) {
+  for (let i = 0; i < fuelCars.length; i++) {
+    const c = fuelCars[i];
+    if (c.wait > 0) { c.wait -= dt; }
+    else {
+      const t = c.path[c.i];
+      const dx = t.x - c.x, dz = t.z - c.z;
+      const d = Math.hypot(dx, dz);
+      if (d < 0.5) {
+        c.x = t.x; c.z = t.z;
+        c.wait = t.w || 0;
+        c.i = (c.i + 1) % c.path.length;
+      } else {
+        const v = Math.min(11, d) * dt;
+        c.x += dx / d * v; c.z += dz / d * v;
+        c.ang = Math.atan2(dx, dz);
+      }
+    }
+    _fd.rotation.set(0, c.ang, 0);
+    _fd.position.set(c.x, 0.72, c.z);
+    _fd.scale.set(1.72, 0.82, 3.9);
+    _fd.updateMatrix();
+    fcBodyMesh.setMatrixAt(i, _fd.matrix);
+    _fd.position.set(c.x, 1.3, c.z);
+    _fd.scale.set(1.6, 0.6, 1.95);
+    _fd.updateMatrix();
+    fcCabMesh.setMatrixAt(i, _fd.matrix);
+    let w = i * 4;
+    for (const sx of [-1, 1]) for (const sz of [-1, 1]) {
+      const wx = c.x + (Math.cos(c.ang) * sx * 0.86 + Math.sin(c.ang) * sz * 1.25);
+      const wz = c.z + (-Math.sin(c.ang) * sx * 0.86 + Math.cos(c.ang) * sz * 1.25);
+      _fd.position.set(wx, 0.34, wz);
+      _fd.rotation.set(0, c.ang, Math.PI / 2, 'YXZ');
+      _fd.scale.set(0.68, 0.24, 0.68);
+      _fd.updateMatrix();
+      fcWheelMesh.setMatrixAt(w++, _fd.matrix);
+    }
+  }
+  fcBodyMesh.instanceMatrix.needsUpdate = true;
+  fcCabMesh.instanceMatrix.needsUpdate = true;
+  fcWheelMesh.instanceMatrix.needsUpdate = true;
 }
 
 /* --------------------------------------------------------------- camera -- */
@@ -681,6 +997,16 @@ function setMode(mode) {
   document.querySelectorAll('.btn[data-mode]').forEach(b => b.classList.toggle('on', b.dataset.mode === mode));
   applyCamera();
 }
+
+document.getElementById('setBtn').addEventListener('click', () => {
+  const p = document.getElementById('panel');
+  p.classList.toggle('open');
+  document.getElementById('setBtn').classList.toggle('on', p.classList.contains('open'));
+});
+
+document.querySelectorAll('.qbtn').forEach(b => {
+  b.addEventListener('click', () => applyQuality(b.dataset.q, true));
+});
 
 document.querySelectorAll('.btn[data-mode]').forEach(b => {
   b.addEventListener('click', () => setMode(b.dataset.mode));
@@ -785,6 +1111,8 @@ function tick() {
   }
 
   applyCamera();
+  updatePeds(dt, clock.elapsedTime);
+  updateFuelCars(dt);
   renderer.render(scene, camera);
 
   frames++; fpsTime += dt;
@@ -799,11 +1127,15 @@ function tick() {
 /* ----------------------------------------------------------------- init -- */
 buildCity();
 for (const key in B) B[key].build(key !== 'win');
+buildPeds();
+buildFuelCars();
 setMode('low');
+applyQuality(quality, false);
 
 addEventListener('resize', () => {
   camera.aspect = innerWidth / innerHeight;
   camera.updateProjectionMatrix();
+  renderer.setPixelRatio(Math.min(devicePixelRatio || 1, QSET[quality].pr));
   renderer.setSize(innerWidth, innerHeight);
 });
 
