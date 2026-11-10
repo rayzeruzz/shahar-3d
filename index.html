@@ -1,0 +1,817 @@
+<!doctype html>
+<html lang="uz">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+<title>Shahar 3D · Mahalla</title>
+<style>
+  html,body{margin:0;height:100%;overflow:hidden;background:#0b1220;
+    font-family:system-ui,-apple-system,"Segoe UI",Roboto,Arial,sans-serif;
+    -webkit-user-select:none;user-select:none;-webkit-tap-highlight-color:transparent}
+  canvas{display:block}
+  #app{position:fixed;inset:0}
+  #hud{position:fixed;inset:0;pointer-events:none;z-index:10}
+  #top{position:absolute;left:12px;top:12px;display:flex;flex-direction:column;gap:6px}
+  .chip{background:rgba(9,17,28,.72);color:#e8f1fb;border:1px solid rgba(255,255,255,.14);
+    border-radius:10px;padding:7px 11px;font-size:12px;line-height:1.25;backdrop-filter:blur(6px);
+    max-width:min(340px,72vw)}
+  .chip b{color:#fff;font-weight:600}
+  .chip span{opacity:.72}
+  #bottom{position:absolute;left:12px;right:12px;bottom:12px;display:flex;gap:8px;flex-wrap:wrap;
+    align-items:flex-end;justify-content:space-between}
+  #modes{display:flex;gap:8px;flex-wrap:wrap;pointer-events:auto}
+  .btn{appearance:none;border:1px solid rgba(255,255,255,.18);background:rgba(9,17,28,.78);
+    color:#dce9f6;font-size:13px;font-weight:600;padding:10px 14px;border-radius:12px;
+    backdrop-filter:blur(6px);cursor:pointer;transition:background .15s,color .15s,transform .1s}
+  .btn:active{transform:scale(.97)}
+  .btn.on{background:#2f7cf6;border-color:#5c9dff;color:#fff;box-shadow:0 4px 18px rgba(47,124,246,.45)}
+  #hint{pointer-events:none;font-size:11.5px;color:rgba(255,255,255,.82);
+    background:rgba(9,17,28,.6);border-radius:10px;padding:7px 10px;max-width:min(430px,60vw);line-height:1.35}
+  #load{position:fixed;inset:0;background:#0b1220;display:flex;align-items:center;justify-content:center;
+    flex-direction:column;gap:14px;z-index:50;transition:opacity .5s;color:#cfe0f0;font-size:14px}
+  #load.hide{opacity:0;pointer-events:none}
+  .spinner{width:34px;height:34px;border:3px solid rgba(255,255,255,.16);border-top-color:#4f9dff;
+    border-radius:50%;animation:spin 1s linear infinite}
+  @keyframes spin{to{transform:rotate(360deg)}}
+  @media (max-width:640px){
+    .btn{padding:9px 11px;font-size:12px}
+    #hint{display:none}
+  }
+</style>
+</head>
+<body>
+<div id="app"></div>
+<div id="load"><div class="spinner"></div><div>Shahar yuklanmoqda…</div></div>
+<div id="hud">
+  <div id="top">
+    <div class="chip"><b>Mahalla 3D</b> <span>· 75 uy · maktab, kasalxona, bog', masjid, bozor</span></div>
+    <div class="chip" id="stats"><span>FPS —</span></div>
+  </div>
+  <div id="bottom">
+    <div id="modes">
+      <button class="btn" data-mode="walk">Yurish</button>
+      <button class="btn" data-mode="low">Past burchak</button>
+      <button class="btn" data-mode="top">Tepa</button>
+    </div>
+    <div id="hint">Sichqoncha — aylantirish · g'ildirak — zoom · WASD — yurish · 1 / 2 / 3 — ko'rinish</div>
+  </div>
+</div>
+
+<script type="importmap">
+{"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js"}}
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+/* ---------------------------------------------------------------- core --- */
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x9ec7e8);
+scene.fog = new THREE.Fog(0xa8cbe6, 480, 1250);
+
+const camera = new THREE.PerspectiveCamera(55, innerWidth / innerHeight, 0.4, 3000);
+const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
+renderer.setPixelRatio(Math.min(devicePixelRatio || 1, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+document.getElementById('app').appendChild(renderer.domElement);
+
+const hemi = new THREE.HemisphereLight(0xd7ecff, 0x4e5f3c, 1.05);
+scene.add(hemi);
+
+const sun = new THREE.DirectionalLight(0xfff2da, 1.75);
+sun.position.set(260, 380, 200);
+sun.castShadow = true;
+sun.shadow.mapSize.set(2048, 2048);
+sun.shadow.bias = -0.0007;
+const sc = sun.shadow.camera;
+sc.left = -330; sc.right = 330; sc.top = 330; sc.bottom = -330; sc.near = 1; sc.far = 1500;
+scene.add(sun);
+scene.add(sun.target);
+
+/* ------------------------------------------------------------- batches --- */
+const matSolid = new THREE.MeshLambertMaterial({ color: 0xffffff });
+const matGlass = new THREE.MeshLambertMaterial({ color: 0x2b3f52, emissive: 0xffcf8a, emissiveIntensity: 0.03 });
+const matWater = new THREE.MeshLambertMaterial({ color: 0x3f7fbd, transparent: true, opacity: 0.85 });
+
+class Batch {
+  constructor(geo, mat, baseRot) {
+    this.geo = geo; this.mat = mat;
+    this.baseRot = baseRot || [0, 0, 0];
+    this.mats = []; this.cols = [];
+    this.dummy = new THREE.Object3D();
+  }
+  add(x, y, z, sx, sy, sz, color, ry = 0, rx = 0, rz = 0) {
+    const d = this.dummy;
+    d.position.set(x, y, z);
+    d.rotation.set(rx + this.baseRot[0], ry + this.baseRot[1], rz + this.baseRot[2]);
+    d.scale.set(sx, sy, sz);
+    d.updateMatrix();
+    this.mats.push(d.matrix.clone());
+    this.cols.push(color === undefined ? 0xffffff : color);
+  }
+  build(castShadow = true) {
+    if (!this.mats.length) return null;
+    const mesh = new THREE.InstancedMesh(this.geo, this.mat, this.mats.length);
+    const c = new THREE.Color();
+    for (let i = 0; i < this.mats.length; i++) {
+      mesh.setMatrixAt(i, this.mats[i]);
+      c.setHex(this.cols[i]);
+      mesh.setColorAt(i, c);
+    }
+    mesh.instanceMatrix.needsUpdate = true;
+    if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+    mesh.castShadow = castShadow;
+    mesh.receiveShadow = true;
+    mesh.frustumCulled = false;
+    scene.add(mesh);
+    return mesh;
+  }
+}
+
+const B = {
+  box:   new Batch(new THREE.BoxGeometry(1, 1, 1), matSolid),
+  cyl:   new Batch(new THREE.CylinderGeometry(0.5, 0.5, 1, 12), matSolid),
+  cylX:  new Batch(new THREE.CylinderGeometry(0.5, 0.5, 1, 10), matSolid, [0, 0, Math.PI / 2]),
+  cone:  new Batch(new THREE.ConeGeometry(0.5, 1, 7), matSolid),
+  roof:  new Batch(new THREE.ConeGeometry(0.7071, 1, 4), matSolid, [0, Math.PI / 4, 0]),
+  dome:  new Batch(new THREE.SphereGeometry(0.5, 14, 9, 0, Math.PI * 2, 0, Math.PI / 2), matSolid),
+  sph:   new Batch(new THREE.SphereGeometry(0.5, 10, 8), matSolid),
+  win:   new Batch(new THREE.PlaneGeometry(1, 1), matGlass)
+};
+
+const box  = (x, y, z, sx, sy, sz, color, ry = 0) => B.box.add(x, y, z, sx, sy, sz, color, ry);
+const boxB = (x, z, sx, sz, h, color, ry = 0) => B.box.add(x, h / 2, z, sx, h, sz, color, ry);
+
+/* --------------------------------------------------------------- palette -- */
+const ASPHALT = 0x3c4046, SIDEWALK = 0xa9a79c, LINE = 0xf3f1e6;
+const WALL = [0xd9c8a4, 0xcdb795, 0xe4dac6, 0xbfcbae, 0xd8b795, 0xc8c2b6, 0xe8e2d4];
+const ROOF = [0x8d4b33, 0x7a3a28, 0x9b5c3d, 0x4a6b88, 0x6d5140];
+const TREE = [0x3f6f36, 0x4c7d3e, 0x35602f, 0x578a44];
+const PINE = [0x2c5734, 0x33643a, 0x264a2d];
+const CAR   = [0xf2f2f2, 0x1e2a38, 0x9aa3ad, 0x2d5f9e, 0x8f1f24, 0x2f6b4f, 0xd9c14a, 0x5b3c78];
+const FENCE = [0xb7ae9e, 0xc3b9a6, 0xa89f90];
+
+/* ------------------------------------------------------------ utilities -- */
+let seed = 20261110;
+function rnd() { seed = (seed * 1664525 + 1013904223) % 4294967296; return seed / 4294967296; }
+const rand = (a, b) => a + rnd() * (b - a);
+const pick = (arr) => arr[Math.floor(rnd() * arr.length) % arr.length];
+
+function local(cx, cz, ry, dx, dz) {
+  const c = Math.cos(ry), s = Math.sin(ry);
+  return [cx + dx * c - dz * s, cz + dx * s + dz * c];
+}
+
+/* ------------------------------------------------------------- signage --- */
+function label(text, x, y, z, ry, w, h, bg, fg) {
+  const cv = document.createElement('canvas');
+  cv.width = 512; cv.height = 128;
+  const g = cv.getContext('2d');
+  g.fillStyle = bg || '#12457a'; g.fillRect(0, 0, 512, 128);
+  g.fillStyle = fg || '#ffffff';
+  g.font = 'bold 58px system-ui, Arial, sans-serif';
+  g.textAlign = 'center'; g.textBaseline = 'middle';
+  g.fillText(text, 256, 68, 480);
+  const tex = new THREE.CanvasTexture(cv);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  tex.anisotropy = 4;
+  const m = new THREE.Mesh(new THREE.PlaneGeometry(w, h),
+    new THREE.MeshBasicMaterial({ map: tex, side: THREE.DoubleSide }));
+  m.position.set(x, y, z);
+  m.rotation.y = ry;
+  scene.add(m);
+  return m;
+}
+
+/* --------------------------------------------------------------- roads --- */
+function buildRoads() {
+  // outer ring around the mahalla
+  box(0, 0.03, -120, 420, 0.06, 9, ASPHALT);
+  box(0, 0.03,  120, 420, 0.06, 9, ASPHALT);
+  box(-201, 0.03, 0, 9, 0.06, 231, ASPHALT);
+  box( 201, 0.03, 0, 9, 0.06, 231, ASPHALT);
+
+  // inner mahalla streets
+  for (const x of [-120, -40, 40, 120]) box(x, 0.03, 0, 14, 0.06, 236, ASPHALT);
+  for (const z of [-40, 40]) box(0, 0.03, z, 400, 0.06, 8, ASPHALT);
+
+  // approaches to the city districts
+  box(0, 0.03, 175, 14, 0.06, 120, ASPHALT);
+  box(-201, 0.03, 205, 9, 0.06, 180, ASPHALT);
+  box(201, 0.03, 205, 9, 0.06, 180, ASPHALT);
+  box(0, 0.03, -215, 14, 0.06, 200, ASPHALT);
+  box(-120, 0.03, -170, 9, 0.06, 100, ASPHALT);
+  box(120, 0.03, -170, 9, 0.06, 100, ASPHALT);
+  box(-300, 0.03, 0, 200, 0.06, 9, ASPHALT);
+  box(300, 0.03, 0, 200, 0.06, 9, ASPHALT);
+
+  // sidewalks along the ring
+  box(0, 0.06, -114.5, 420, 0.12, 2.2, SIDEWALK);
+  box(0, 0.06,  114.5, 420, 0.12, 2.2, SIDEWALK);
+  box(-195.5, 0.06, 0, 2.2, 0.12, 231, SIDEWALK);
+  box( 195.5, 0.06, 0, 2.2, 0.12, 231, SIDEWALK);
+
+  // centre dashes
+  for (let x = -200; x <= 200; x += 12) {
+    if (Math.abs(x) < 8) continue;
+    box(x, 0.075, -120, 5, 0.02, 0.22, LINE);
+    box(x, 0.075, 120, 5, 0.02, 0.22, LINE);
+  }
+  for (let z = -110; z <= 110; z += 12) {
+    box(-201, 0.075, z, 0.22, 0.02, 5, LINE);
+    box(201, 0.075, z, 0.22, 0.02, 5, LINE);
+  }
+  for (const x of [-120, -40, 40, 120]) {
+    for (let z = -112; z <= 112; z += 12) box(x, 0.075, z, 0.22, 0.02, 5, LINE);
+  }
+  for (const z of [-40, 40]) {
+    for (let x = -192; x <= 192; x += 12) box(x, 0.075, z, 5, 0.02, 0.2, LINE);
+  }
+
+  // zebra crossings near schools / hospital / kindergarten
+  const zebra = (x, z, along) => {
+    for (let i = -3; i <= 3; i++) {
+      if (along === 'x') box(x + i * 1.1, 0.078, z, 0.55, 0.02, 7.2, LINE);
+      else box(x, 0.078, z + i * 1.1, 7.2, 0.02, 0.55, LINE);
+    }
+  };
+  zebra(-160, -120, 'x'); zebra(160, -120, 'x');
+  zebra(-160, 120, 'x'); zebra(0, 120, 'x');
+  zebra(-201, -40, 'z'); zebra(201, 40, 'z');
+}
+
+/* --------------------------------------------------------------- house --- */
+function house(hx, hz, dir) {
+  const w = rand(8.4, 10.2), d = 7, two = rnd() < 0.26;
+  const h = two ? 6.4 : 3.6;
+  const wallC = pick(WALL), roofC = pick(ROOF);
+  const frontZ = hz + dir * (d / 2);
+
+  boxB(hx, hz, w, d, h, wallC);
+  B.roof.add(hx, h + 0.1, hz, w * 1.14, two ? 1.75 : 1.5, d * 1.16, roofC, 0);
+
+  // plinth
+  boxB(hx, hz, w + 0.25, d + 0.25, 0.35, 0x9d978c);
+
+  // windows: front + both sides
+  const faceZ = frontZ + dir * 0.04;
+  const ryF = dir > 0 ? 0 : Math.PI;
+  const wy = two ? [1.75, 4.55] : [1.8];
+  for (const y of wy) {
+    B.win.add(hx - w * 0.24, y, faceZ, 1.35, 1.5, 1, 0xffffff, ryF);
+    B.win.add(hx + w * 0.24, y, faceZ, 1.35, 1.5, 1, 0xffffff, ryF);
+  }
+  B.win.add(hx - w / 2 - 0.04, 1.9, hz, 1.25, 1.4, 1, 0xffffff, -Math.PI / 2);
+  B.win.add(hx + w / 2 + 0.04, 1.9, hz, 1.25, 1.4, 1, 0xffffff, Math.PI / 2);
+  if (two) {
+    B.win.add(hx - w / 2 - 0.04, 4.7, hz, 1.25, 1.4, 1, 0xffffff, -Math.PI / 2);
+    B.win.add(hx + w / 2 + 0.04, 4.7, hz, 1.25, 1.4, 1, 0xffffff, Math.PI / 2);
+  }
+
+  // door
+  box(hx, 1.15, frontZ + dir * 0.09, 1.25, 2.3, 0.16, 0x6b4a32, ryF);
+
+  // ayvon (porch): roof slab on two posts
+  if (!two) {
+    const pz = frontZ + dir * 1.9;
+    box(hx, 2.85, pz, 6.4, 0.22, 3.4, 0xd8d2c4);
+    const [p1x, p1z] = local(hx, pz, 0, -2.85, dir * 1.5);
+    const [p2x, p2z] = local(hx, pz, 0, 2.85, dir * 1.5);
+    B.cyl.add(p1x, 1.42, p1z, 0.28, 2.84, 0.28, 0xe6e0d2);
+    B.cyl.add(p2x, 1.42, p2z, 0.28, 2.84, 0.28, 0xe6e0d2);
+    box(hx, 0.16, pz + dir * 1.5, 6.2, 0.3, 2.8, 0xa8a296);
+  }
+
+  // yard fence with a gate
+  const fenceC = pick(FENCE);
+  const yFront = frontZ + dir * 9, sideX = w / 2 + 2.4;
+  const seg = sideX - 1.25;
+  box(hx - sideX, 0.8, hz + dir * 5.2, 0.22, 1.6, 9.2, fenceC);
+  box(hx + sideX, 0.8, hz + dir * 5.2, 0.22, 1.6, 9.2, fenceC);
+  box(hx - (1.25 + seg / 2), 0.8, yFront, seg, 1.6, 0.22, fenceC);
+  box(hx + (1.25 + seg / 2), 0.8, yFront, seg, 1.6, 0.22, fenceC);
+  // gate posts + panels
+  box(hx - 1.3, 1.05, yFront, 0.3, 2.1, 0.32, 0x8a8074);
+  box(hx + 1.3, 1.05, yFront, 0.3, 2.1, 0.32, 0x8a8074);
+  box(hx, 2.15, yFront, 2.9, 0.18, 0.34, 0x8a8074);
+  box(hx, 0.85, yFront, 1.05, 1.5, 0.12, 0x7d5b3d);
+  box(hx + 1.06, 0.85, yFront, 1.05, 1.5, 0.12, 0x7d5b3d);
+
+  // yard tree
+  if (rnd() < 0.75) {
+    const [tx, tz] = local(hx, yFront, 0, rand(-sideX + 1, sideX - 1), rand(-6.5, -2.2));
+    tree(tx, tz, rand(0.85, 1.25));
+  }
+
+  // parked car in the yard
+  if (rnd() < 0.62) {
+    const [cx, cz] = local(hx, yFront, 0, rand(-2.6, 2.6), rand(-4.4, -2.6));
+    car(cx, cz, dir > 0 ? 0 : Math.PI, pick(CAR), rnd() < 0.3);
+  }
+
+  // courtyard greenery inside the block
+  if (rnd() < 0.35) {
+    const [gx, gz] = local(hx, hz, 0, rand(-9, 9), rand(-9, -5) * dir);
+    tree(gx, gz, rand(0.9, 1.35));
+  }
+}
+
+/* ---------------------------------------------------------------- trees -- */
+function tree(x, z, s) {
+  const c = pick(TREE);
+  B.cyl.add(x, 1.4 * s, z, 0.5 * s, 2.8 * s, 0.5 * s, 0x6b4a33);
+  B.sph.add(x, 3.5 * s, z, 3.4 * s, 2.9 * s, 3.4 * s, c);
+  B.sph.add(x + 0.9 * s, 4.3 * s, z - 0.4 * s, 2.2 * s, 2.0 * s, 2.2 * s, c);
+}
+function pine(x, z, s) {
+  const c = pick(PINE);
+  B.cyl.add(x, 1.1 * s, z, 0.34 * s, 2.2 * s, 0.34 * s, 0x5d4130);
+  B.cone.add(x, 3.4 * s, z, 3.3 * s, 4.4 * s, 3.3 * s, c);
+  B.cone.add(x, 5.4 * s, z, 2.4 * s, 3.4 * s, 2.4 * s, c);
+  B.cone.add(x, 7.1 * s, z, 1.5 * s, 2.6 * s, 1.5 * s, c);
+}
+
+/* ----------------------------------------------------------------- cars -- */
+function car(cx, cz, ry, color, van) {
+  const L = van ? 4.2 : 3.9, W = van ? 1.78 : 1.72;
+  const bodyH = van ? 1.35 : 0.78;
+  const bodyY = van ? 1.0 : 0.72;
+
+  B.box.add(cx, bodyY, cz, W, bodyH, L, color, ry);
+  if (van) {
+    B.box.add(cx, 1.72, cz, W * 0.96, 0.55, L * 0.86, color, ry);
+    B.win.add(...carWin(cx, cz, ry, 0, 1.72, L * 0.86 / 2 + 0.02, W * 0.8, 0.5), 0xffffff, ry);
+    B.win.add(...carWin(cx, cz, ry, 0, 1.72, -L * 0.86 / 2 - 0.02, W * 0.8, 0.5), 0xffffff, ry + Math.PI);
+  } else {
+    const cabL = L * 0.5;
+    B.box.add(cx, 1.32, cz, W * 0.94, 0.62, cabL, color, ry);
+    B.box.add(cx, 1.36, cz, W * 0.9, 0.5, cabL * 0.92, 0x2b3a49, ry);
+    B.box.add(cx, 0.55, cz, W * 1.02, 0.22, L * 0.9, 0x1b222b, ry);
+  }
+  const wx = W * 0.46, wz = L * 0.31;
+  for (const sx of [-1, 1]) for (const sz of [-1, 1]) {
+    const [x, z] = local(cx, cz, ry, sx * wx, sz * wz);
+    B.cylX.add(x, 0.34, z, 0.68, 0.24, 0.68, 0x14161a, ry);
+  }
+}
+function carWin(cx, cz, ry, dx, y, dz, w, h) {
+  const [x, z] = local(cx, cz, ry, dx, dz);
+  return [x, y, z, w, h, 1];
+}
+
+/* -------------------------------------------------------------- mahalla -- */
+function buildMahalla() {
+  const cols = [-160, -80, 0, 80, 160];
+  const rows = [-80, 0, 80];
+  for (const cx of cols) {
+    for (const cz of rows) {
+      for (let i = 0; i < 3; i++) house(cx + (i - 1) * 20.5, cz - 26, -1);
+      for (let i = 0; i < 2; i++) house(cx + (i === 0 ? -11 : 11), cz + 26, 1);
+      // courtyard trees
+      for (let i = 0; i < 2; i++) tree(cx + rand(-22, 22), cz + rand(-9, 9), rand(0.8, 1.2));
+    }
+  }
+  // street lamps inside the mahalla
+  for (const x of [-120, -40, 40, 120]) {
+    for (let z = -110; z <= 110; z += 28) {
+      lamp(x + 8, z, -Math.PI / 2);
+      lamp(x - 8, z + 14, Math.PI / 2);
+    }
+  }
+  for (const z of [-40, 40]) {
+    for (let x = -186; x <= 186; x += 30) lamp(x, z + 5.4, 0);
+  }
+}
+
+/* ---------------------------------------------------------------- lamps -- */
+function lamp(x, z, ry) {
+  B.cyl.add(x, 2.6, z, 0.18, 5.2, 0.18, 0x4a4e52);
+  B.cyl.add(x, 5.2, z, 0.5, 0.22, 0.5, 0x3e4246);
+  const [hx, hz] = local(x, z, ry || 0, 0, 0.9);
+  B.sph.add(hx, 5.25, hz, 0.72, 0.5, 0.72, 0xfff2c8);
+}
+
+/* ------------------------------------------------------------ buildings -- */
+function windowGrid(x, z, w, floors, ry, color) {
+  const perFloor = Math.max(2, Math.floor(w / 4));
+  for (let f = 0; f < floors; f++) {
+    const y = 2.2 + f * 3.2;
+    for (let i = 0; i < perFloor; i++) {
+      const dx = (i - (perFloor - 1) / 2) * (w / perFloor);
+      const [px, pz] = local(x, z, ry, dx, 0);
+      B.win.add(px, y, pz, 1.5, 1.7, 1, 0xffffff, ry);
+    }
+  }
+}
+
+function school(x, z, name, ry = 0) {
+  const w = 52, d = 22, h = 11.5;
+  boxB(x, z, w, d, h, 0xe8dcc0);
+  B.roof.add(x, h, z, w * 1.04, 1.4, d * 1.06, 0x8d4b33, ry);
+  windowGrid(x, z + d / 2 + 0.05, w, 3, 0);
+  windowGrid(x, z - d / 2 - 0.05, w, 3, Math.PI);
+  // entrance
+  boxB(x, z + d / 2 + 3.2, 12, 6, 4.2, 0xf4ecdc);
+  box(x, 2.1, z + d / 2 + 6.3, 4, 4.2, 0.3, 0x30536f);
+  box(x, 4.4, z + d / 2 + 5.2, 13, 0.35, 4.2, 0xcfc6b3);
+  label(name, x, 7.6, z + d / 2 + 0.12, 0, 15, 3.6, '#1b4c78');
+  // yard
+  box(x, 0.04, z + 22, 58, 0.08, 18, 0x7d9a56);
+  for (let i = 0; i < 8; i++) tree(x + rand(-26, 26), z + 20 + rand(-6, 6), rand(0.9, 1.2));
+  for (let i = 0; i < 3; i++) lamp(x - 22 + i * 22, z + 32, 0);
+}
+
+function hospital(x, z) {
+  const w = 46, d = 24, h = 13.5;
+  boxB(x, z, w, d, h, 0xf1f3f2);
+  B.roof.add(x, h, z, w * 1.03, 1.2, d * 1.04, 0xb8574a);
+  windowGrid(x, z + d / 2 + 0.05, w, 4, 0);
+  windowGrid(x, z - d / 2 - 0.05, w, 4, Math.PI);
+  windowGrid(x + w / 2 + 0.05, z, d, 4, Math.PI / 2);
+  // red cross
+  label('+', x - 16, 9.6, z + d / 2 + 0.1, 0, 6, 6, '#c0392b');
+  label("Markaziy kasalxona", x + 4, 9.6, z + d / 2 + 0.1, 0, 22, 4, '#1b4c78');
+  boxB(x, z + d / 2 + 4, 14, 7, 5, 0xdedfda);
+  // ambulance bay
+  box(x, 0.04, z + 20, 34, 0.08, 12, 0x8b8f8c);
+}
+
+function supermarket(x, z, name, ry = 0) {
+  const w = 21, d = 14, h = 5.4;
+  boxB(x, z, w, d, h, 0xe9e4d6, ry);
+  box(x, h + 0.15, z, w + 0.6, 0.3, d + 0.6, 0x2f5f8a, ry);
+  label(name, x, h - 1.1, z + d / 2 + 0.08, 0, 13, 2.6, '#c8342c');
+  B.win.add(x, 1.9, z + d / 2 + 0.06, w * 0.72, 2.6, 1, 0xffffff, 0);
+  for (let i = 0; i < 3; i++) {
+    const [px, pz] = local(x, z + d / 2 + 1.1, 0, (i - 1) * 5.5, 0);
+    box(px, 0.9, pz, 3.4, 1.8, 1.1, 0x9aa0a6);
+  }
+}
+
+function kindergarten(x, z, name) {
+  const w = 20, d = 14, h = 4.6;
+  boxB(x, z, w, d, h, 0xf6e2b8);
+  B.roof.add(x, h, z, w * 1.12, 1.1, d * 1.14, 0xd8634a);
+  windowGrid(x, z + d / 2 + 0.05, w, 1, 0);
+  label(name, x, h + 1.4, z + d / 2 + 0.08, 0, 11, 2.4, '#e07a3f');
+  box(x, 0.04, z + 14, 26, 0.08, 14, 0x8fae62);
+  for (let i = 0; i < 5; i++) {
+    const px = x - 9 + i * 4.5;
+    B.cyl.add(px, 0.9, z + 14, 0.18, 1.8, 0.18, 0xd8b23a);
+    B.cone.add(px, 2.0, z + 14, 0.5, 0.9, 0.5, pick([0xd94a3a, 0x3a7bd9, 0x46a84a]));
+  }
+  box(x, 0.04, z + 20, 8, 0.1, 6, 0xd9c07a);
+}
+
+function mosque(x, z) {
+  const w = 18, d = 18, h = 8;
+  boxB(x, z, w, d, h, 0xe6ddc8);
+  B.dome.add(x, h, z, 15, 9, 15, 0x3f8f8a);
+  B.cyl.add(x, h + 5.2, z, 1.1, 2.2, 1.1, 0xc9a227);
+  // portal
+  box(x, 4.2, z + d / 2 + 0.6, 7, 8.4, 1.2, 0xdcd0b6);
+  box(x, 3.4, z + d / 2 + 1.3, 3.6, 6.8, 0.4, 0x4b6b5c);
+  // minarets
+  for (const sx of [-1, 1]) {
+    const mx = x + sx * (w / 2 + 2.6);
+    B.cyl.add(mx, 9, z + d / 2 - 1, 2.3, 18, 2.3, 0xe0d6c0);
+    B.dome.add(mx, 18, z + d / 2 - 1, 3.2, 2.6, 3.2, 0x3f8f8a);
+    B.cyl.add(mx, 19.6, z + d / 2 - 1, 0.35, 1.6, 0.35, 0xc9a227);
+  }
+  label('Masjid', x, 9.6, z + d / 2 + 1.5, 0, 7, 1.9, '#2f6b5e');
+}
+
+function park(x, z) {
+  const W = 190, D = 150;
+  box(x, 0.035, z, W, 0.07, D, 0x74984f);
+  // paths
+  box(x, 0.06, z, 7, 0.1, D - 10, 0xd9d2bd);
+  box(x, 0.06, z, W - 10, 0.1, 7, 0xd9d2bd);
+  box(x, 0.06, z, 120, 0.1, 5, 0xd9d2bd, 0.6);
+  // central plaza + fountain
+  B.cyl.add(x, 0.2, z, 24, 0.4, 24, 0xcfc7b0);
+  B.cyl.add(x, 0.55, z, 13, 1.1, 13, 0x9fa3a6);
+  B.cyl.add(x, 0.95, z, 11.6, 0.5, 11.6, 0x3f7fbd);
+  B.cyl.add(x, 2.6, z, 1.6, 4.2, 1.6, 0x9fa3a6);
+  B.sph.add(x, 5.1, z, 2.6, 1.6, 2.6, 0x3f7fbd);
+  // pines and lamps and benches
+  for (let i = 0; i < 46; i++) {
+    const px = x + rand(-W / 2 + 8, W / 2 - 8);
+    const pz = z + rand(-D / 2 + 8, D / 2 - 8);
+    if (Math.abs(px - x) < 7 || Math.abs(pz - z) < 7) continue;
+    pine(px, pz, rand(0.9, 1.45));
+  }
+  for (let i = 0; i < 12; i++) {
+    const side = i % 2 === 0 ? -1 : 1;
+    const lz = z + (i - 6) * 11;
+    lamp(x + side * 4.6, lz, 0);
+    bench(x + side * 6.6, lz + 4, side > 0 ? -Math.PI / 2 : Math.PI / 2);
+  }
+  label("Markaziy bog'", x, 6.5, z + D / 2 - 2, 0, 16, 3, '#2f6b3d');
+}
+
+function bench(x, z, ry) {
+  box(x, 0.55, z, 2.6, 0.14, 0.8, 0x9a6b3f, ry);
+  box(x, 1.0, z, 2.6, 0.7, 0.12, 0x8a5f38, ry);
+  const [l1x, l1z] = local(x, z, ry, -1.1, 0);
+  const [l2x, l2z] = local(x, z, ry, 1.1, 0);
+  box(l1x, 0.27, l1z, 0.14, 0.55, 0.6, 0x4a4e52);
+  box(l2x, 0.27, l2z, 0.14, 0.55, 0.6, 0x4a4e52);
+}
+
+function busStop(x, z, ry) {
+  const w = 8, d = 3.4;
+  box(x, 0.08, z, w + 2, 0.16, d + 2, SIDEWALK, ry);
+  for (const sx of [-1, 1]) {
+    const [px, pz] = local(x, z, ry, sx * (w / 2 - 0.5), -d / 2 + 0.4);
+    B.cyl.add(px, 1.5, pz, 0.18, 3, 0.18, 0x4a4e52);
+  }
+  box(x, 3.05, z, w, 0.2, d + 0.8, 0x2f5f8a, ry);
+  box(x, 0.9, z - d / 2 + 0.4, w - 1.6, 1.1, 0.14, 0x2f5f8a, ry);
+  bench(x, z + 0.2, ry + Math.PI);
+  label('Avtobus', x, 2.4, z, ry, 3.6, 0.9, '#1b4c78');
+  // mini-market beside the stop
+  const [mx, mz] = local(x, z, ry, w / 2 + 9, 0);
+  boxB(mx, mz, 15, 10, 4.4, 0xece5d4, ry);
+  box(mx, 4.55, mz, 15.6, 0.3, 10.6, 0xc8342c, ry);
+  label("Do'kon", mx, 3.2, mz - 5.05, Math.PI, 8, 1.8, '#c8342c');
+  B.win.add(mx, 1.8, mz - 5.05, 9, 2.4, 1, 0xffffff, Math.PI);
+}
+
+function apartment(x, z, w, d, floors) {
+  const h = floors * 3.1;
+  boxB(x, z, w, d, h, pick([0xd6cfc0, 0xcfd6dd, 0xe0d5bd, 0xc5cfc4]));
+  box(x, h + 0.2, z, w + 0.8, 0.4, d + 0.8, 0x8c8c84);
+  windowGrid(x, z + d / 2 + 0.05, w, floors, 0);
+  windowGrid(x, z - d / 2 - 0.05, w, floors, Math.PI);
+  windowGrid(x + w / 2 + 0.05, z, d, floors, Math.PI / 2);
+  windowGrid(x - w / 2 - 0.05, z, d, floors, -Math.PI / 2);
+}
+
+/* -------------------------------------------------------------- railway -- */
+function buildRailway() {
+  const R = 430;
+  const gravel = new THREE.Mesh(new THREE.RingGeometry(R - 7, R + 7, 160),
+    new THREE.MeshLambertMaterial({ color: 0x8b867c }));
+  gravel.rotation.x = -Math.PI / 2;
+  gravel.position.y = 0.02;
+  gravel.receiveShadow = true;
+  scene.add(gravel);
+
+  for (const off of [-0.85, 0.85]) {
+    const rail = new THREE.Mesh(new THREE.TorusGeometry(R + off, 0.16, 5, 240),
+      new THREE.MeshLambertMaterial({ color: 0x9aa0a6 }));
+    rail.rotation.x = -Math.PI / 2;
+    rail.position.y = 0.32;
+    scene.add(rail);
+  }
+  // sleepers
+  for (let a = 0; a < Math.PI * 2; a += Math.PI / 90) {
+    const x = Math.cos(a) * R, z = Math.sin(a) * R;
+    box(x, 0.18, z, 1.1, 0.16, 3.0, 0x6b5b47, -a);
+  }
+  // stations
+  const names = ['Shimoliy vokzal', 'Sharqiy vokzal', 'Janubiy vokzal', 'G\'arbiy vokzal'];
+  for (let i = 0; i < 4; i++) {
+    const a = Math.PI / 4 + i * Math.PI / 2;
+    const x = Math.cos(a) * (R - 12), z = Math.sin(a) * (R - 12);
+    const ry = -a + Math.PI / 2;
+    box(x, 0.28, z, 34, 0.5, 9, 0xd0c9b8, ry);
+    boxB(x, z - 2.4, 26, 8, 4.6, 0xe8e0cd, ry);
+    box(x, 5.0, z - 2.4, 28, 0.3, 10, 0x2f5f8a, ry);
+    label(names[i], x, 3.4, z + 4.7, ry + Math.PI, 16, 2.4, '#1b4c78');
+    label('Vokzal', x, 6.2, z - 2.4, Math.PI, 9, 1.9, '#1b4c78');
+  }
+}
+
+/* ----------------------------------------------------------------- city -- */
+function buildCity() {
+  buildMahalla();
+
+  school(-268, -20, '1-Maktab');
+  school(266, 168, '2-Maktab');
+  hospital(272, 22);
+  park(0, 262);
+
+  supermarket(-232, 88, "Supermarket 1", 0);
+  supermarket(232, 88, 'Supermarket 2', Math.PI);
+  supermarket(-236, -96, 'Supermarket 3', 0);
+  supermarket(236, -96, 'Supermarket 4', Math.PI);
+  supermarket(-2, 152, 'Supermarket 5', Math.PI);
+  supermarket(-120, -176, 'Supermarket 6', 0);
+  supermarket(146, -186, 'Supermarket 7', 0);
+
+  kindergarten(-208, 206, "1-Bog'cha");
+  kindergarten(148, 232, "2-Bog'cha");
+  kindergarten(-320, 120, "3-Bog'cha");
+
+  mosque(-214, -196);
+  mosque(84, -226);
+
+  busStop(-201, -60, Math.PI / 2);
+  busStop(201, 60, -Math.PI / 2);
+  busStop(-60, 120, Math.PI);
+  busStop(60, -120, 0);
+
+  // city blocks between mahalla and railway
+  const blocks = [
+    [-330, -250, 44, 20, 7], [-350, 240, 38, 18, 9], [340, -260, 40, 20, 6],
+    [356, 300, 36, 18, 8], [-70, -300, 40, 18, 6], [70, -330, 36, 18, 9],
+    [-320, 340, 40, 18, 7], [255, -330, 34, 18, 6], [-360, 20, 30, 16, 8],
+    [330, 220, 30, 16, 5]
+  ];
+  for (const [x, z, w, d, f] of blocks) apartment(x, z, w, d, f);
+
+  // outskirts greenery
+  for (let i = 0; i < 260; i++) {
+    const a = rand(0, Math.PI * 2), r = rand(300, 410);
+    const x = Math.cos(a) * r, z = Math.sin(a) * r;
+    if (Math.abs(x) < 230 && Math.abs(z) < 230) continue;
+    if (z > 180 && Math.abs(x) < 110) continue; // park
+    if (rnd() < 0.45) pine(x, z, rand(0.9, 1.5)); else tree(x, z, rand(0.9, 1.4));
+  }
+
+  buildRoads();
+  buildRailway();
+}
+
+/* --------------------------------------------------------------- camera -- */
+const cam = {
+  mode: 'low',
+  yaw: 0.95,
+  pitch: 0.52,
+  dist: 265,
+  target: new THREE.Vector3(0, 0, 0),
+  pos: new THREE.Vector3(0, 1.75, 60),
+  lookYaw: Math.PI,
+  lookPitch: -0.03
+};
+const keys = Object.create(null);
+let dragging = false, lastX = 0, lastY = 0;
+let touchDist = 0;
+
+function applyCamera() {
+  if (cam.mode === 'walk') {
+    camera.position.copy(cam.pos);
+    const dir = new THREE.Vector3(
+      Math.sin(cam.lookYaw) * Math.cos(cam.lookPitch),
+      Math.sin(cam.lookPitch),
+      Math.cos(cam.lookYaw) * Math.cos(cam.lookPitch)
+    );
+    camera.lookAt(cam.pos.x + dir.x, cam.pos.y + dir.y, cam.pos.z + dir.z);
+  } else {
+    const p = Math.max(0.06, Math.min(1.5, cam.pitch));
+    const r = cam.dist;
+    camera.position.set(
+      cam.target.x + r * Math.cos(p) * Math.sin(cam.yaw),
+      cam.target.y + r * Math.sin(p),
+      cam.target.z + r * Math.cos(p) * Math.cos(cam.yaw)
+    );
+    camera.lookAt(cam.target.x, cam.target.y, cam.target.z);
+  }
+}
+
+function setMode(mode) {
+  cam.mode = mode;
+  if (mode === 'low') { cam.pitch = 0.5; cam.dist = 265; cam.target.set(0, 0, 0); }
+  if (mode === 'top') { cam.pitch = 1.42; cam.dist = 520; cam.target.set(0, 0, 0); }
+  if (mode === 'walk') { cam.pos.set(0, 1.75, 112); cam.lookYaw = Math.PI; cam.lookPitch = -0.02; }
+  document.querySelectorAll('.btn[data-mode]').forEach(b => b.classList.toggle('on', b.dataset.mode === mode));
+  applyCamera();
+}
+
+document.querySelectorAll('.btn[data-mode]').forEach(b => {
+  b.addEventListener('click', () => setMode(b.dataset.mode));
+});
+
+addEventListener('keydown', e => {
+  keys[e.code] = true;
+  if (e.code === 'Digit1') setMode('walk');
+  if (e.code === 'Digit2') setMode('low');
+  if (e.code === 'Digit3') setMode('top');
+  if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Space'].includes(e.code)) e.preventDefault();
+});
+addEventListener('keyup', e => { keys[e.code] = false; });
+
+const el = renderer.domElement;
+el.addEventListener('mousedown', e => { dragging = true; lastX = e.clientX; lastY = e.clientY; });
+addEventListener('mouseup', () => { dragging = false; });
+addEventListener('mousemove', e => {
+  if (!dragging) return;
+  const dx = e.clientX - lastX, dy = e.clientY - lastY;
+  lastX = e.clientX; lastY = e.clientY;
+  if (cam.mode === 'walk') {
+    cam.lookYaw -= dx * 0.004;
+    cam.lookPitch = Math.max(-1.2, Math.min(1.2, cam.lookPitch - dy * 0.003));
+  } else {
+    cam.yaw -= dx * 0.005;
+    cam.pitch = Math.max(0.08, Math.min(1.5, cam.pitch - dy * 0.004));
+  }
+});
+el.addEventListener('wheel', e => {
+  e.preventDefault();
+  if (cam.mode === 'walk') cam.pos.y = Math.max(1.2, Math.min(60, cam.pos.y + e.deltaY * 0.02));
+  else cam.dist = Math.max(18, Math.min(900, cam.dist * (1 + e.deltaY * 0.0012)));
+}, { passive: false });
+
+el.addEventListener('touchstart', e => {
+  if (e.touches.length === 1) { lastX = e.touches[0].clientX; lastY = e.touches[0].clientY; }
+  if (e.touches.length === 2) {
+    const dx = e.touches[0].clientX - e.touches[1].clientX;
+    const dy = e.touches[0].clientY - e.touches[1].clientY;
+    touchDist = Math.hypot(dx, dy);
+  }
+}, { passive: true });
+
+el.addEventListener('touchmove', e => {
+  if (e.touches.length === 1) {
+    const x = e.touches[0].clientX, y = e.touches[0].clientY;
+    const dx = x - lastX, dy = y - lastY;
+    lastX = x; lastY = y;
+    if (cam.mode === 'walk') {
+      cam.lookYaw -= dx * 0.005;
+      cam.lookPitch = Math.max(-1.2, Math.min(1.2, cam.lookPitch - dy * 0.004));
+    } else {
+      cam.yaw -= dx * 0.006;
+      cam.pitch = Math.max(0.08, Math.min(1.5, cam.pitch - dy * 0.005));
+    }
+  } else if (e.touches.length === 2) {
+    const dx = e.touches[0].clientX - e.touches[1].clientX;
+    const dy = e.touches[0].clientY - e.touches[1].clientY;
+    const d = Math.hypot(dx, dy);
+    if (touchDist > 0 && cam.mode !== 'walk') cam.dist = Math.max(18, Math.min(900, cam.dist * (touchDist / d)));
+    touchDist = d;
+  }
+  e.preventDefault();
+}, { passive: false });
+
+el.addEventListener('touchend', () => { touchDist = 0; }, { passive: true });
+
+/* ----------------------------------------------------------------- loop -- */
+const clock = new THREE.Clock();
+let frames = 0, fpsTime = 0, fps = 0;
+const statsEl = document.getElementById('stats');
+
+function tick() {
+  const dt = Math.min(clock.getDelta(), 0.05);
+  const speed = (keys['ShiftLeft'] || keys['ShiftRight']) ? 46 : 14;
+
+  if (cam.mode === 'walk') {
+    const fx = Math.sin(cam.lookYaw), fz = Math.cos(cam.lookYaw);
+    const rx = Math.cos(cam.lookYaw), rz = -Math.sin(cam.lookYaw);
+    let mx = 0, mz = 0;
+    if (keys['KeyW'] || keys['ArrowUp']) { mx += fx; mz += fz; }
+    if (keys['KeyS'] || keys['ArrowDown']) { mx -= fx; mz -= fz; }
+    if (keys['KeyA'] || keys['ArrowLeft']) { mx -= rx; mz -= rz; }
+    if (keys['KeyD'] || keys['ArrowRight']) { mx += rx; mz += rz; }
+    const len = Math.hypot(mx, mz);
+    if (len > 0) {
+      cam.pos.x += (mx / len) * speed * dt;
+      cam.pos.z += (mz / len) * speed * dt;
+      cam.pos.y = 1.75;
+    }
+    cam.pos.x = Math.max(-620, Math.min(620, cam.pos.x));
+    cam.pos.z = Math.max(-620, Math.min(620, cam.pos.z));
+  } else {
+    const pan = 70 * dt;
+    const fx = Math.sin(cam.yaw), fz = Math.cos(cam.yaw);
+    const rx = Math.cos(cam.yaw), rz = -Math.sin(cam.yaw);
+    if (keys['KeyW'] || keys['ArrowUp']) { cam.target.x -= fx * pan; cam.target.z -= fz * pan; }
+    if (keys['KeyS'] || keys['ArrowDown']) { cam.target.x += fx * pan; cam.target.z += fz * pan; }
+    if (keys['KeyA'] || keys['ArrowLeft']) { cam.target.x -= rx * pan; cam.target.z -= rz * pan; }
+    if (keys['KeyD'] || keys['ArrowRight']) { cam.target.x += rx * pan; cam.target.z += rz * pan; }
+  }
+
+  applyCamera();
+  renderer.render(scene, camera);
+
+  frames++; fpsTime += dt;
+  if (fpsTime >= 0.5) {
+    fps = Math.round(frames / fpsTime);
+    frames = 0; fpsTime = 0;
+    statsEl.innerHTML = '<span>FPS ' + fps + ' · obyektlar ' + renderer.info.render.calls + ' ta chizma</span>';
+  }
+  requestAnimationFrame(tick);
+}
+
+/* ----------------------------------------------------------------- init -- */
+buildCity();
+for (const key in B) B[key].build(key !== 'win');
+setMode('low');
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+requestAnimationFrame(() => {
+  document.getElementById('load').classList.add('hide');
+  tick();
+  window.__cityReady = true;
+});
+</script>
+</body>
+</html>
